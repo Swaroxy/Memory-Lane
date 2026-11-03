@@ -1,0 +1,10 @@
+streamlit>=1.66
+langchain-core>=0.3
+langchain-text-splitters>=0.3
+langchain-huggingface>=0.1
+sentence-transformers>=3.0
+faiss-cpu>=1.8
+rank-bm25>=0.2.2
+pypdf>=4.0
+pandas>=2.0
+numpy>=1.26

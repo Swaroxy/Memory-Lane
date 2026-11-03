@@ -1,0 +1,122 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<style>
+html,body{margin:0;height:100%;background:transparent;color:#e6e9f5;font:12px/1.4 system-ui,-apple-system,'Segoe UI',sans-serif;overflow:hidden}
+#root{position:relative;height:__HEIGHT__px;border-radius:16px;overflow:hidden;border:1px solid rgba(140,160,255,.2);
+  background:radial-gradient(900px 480px at 15% 5%,rgba(99,102,241,.2),transparent 60%),radial-gradient(800px 480px at 95% 95%,rgba(34,211,238,.14),transparent 60%),#04050d}
+canvas{position:absolute;inset:0;width:100%;height:100%;cursor:grab}
+.glass{position:absolute;background:rgba(8,11,26,.7);backdrop-filter:blur(12px);border:1px solid rgba(140,160,255,.2);border-radius:10px;padding:7px 11px}
+#legend{left:10px;bottom:10px;max-height:40%;overflow:auto}
+.lg{display:flex;gap:8px;align-items:center;padding:2px 0;white-space:nowrap}
+.lg i{width:9px;height:9px;border-radius:50%;box-shadow:0 0 8px currentColor}.lg b{font-weight:500;color:#fbbf24}
+#buttons{right:10px;top:10px;display:flex;gap:6px;padding:4px}
+button{background:none;border:0;color:#cbd2ee;cursor:pointer;font:inherit;padding:3px 9px;border-radius:6px}button:hover{background:rgba(255,255,255,.1)}
+#tip{pointer-events:none;opacity:0;max-width:260px;transition:opacity .15s}#tip.on{opacity:1}#tip div{color:#8b93b8;margin-top:2px}
+#empty{display:none;inset:0;align-items:center;justify-content:center;color:#8b93b8;position:absolute}
+</style></head><body>
+<div id="root"><canvas id="cv"></canvas>
+<div id="legend" class="glass"></div>
+<div id="buttons" class="glass"><button id="replay">↻ Replay</button><button id="fit">⤢ Fit</button></div>
+<div id="tip" class="glass"></div><div id="empty">Index some documents to see the graph.</div></div>
+<script>
+(() => {
+const D = __GRAPH__, root = document.getElementById('root'), cv = document.getElementById('cv'), ctx = cv.getContext('2d');
+const COLORS = {stale:'#fb923c', expired:'#f87171', superseded:'#f472b6', modified:'#60a5fa', missing:'#94a3b8'};
+const HL = D.highlight && D.highlight.evidence.length ? D.highlight : null;
+const clamp = (v,a,b) => Math.max(a, Math.min(b, v)), ease = t => 1 - Math.pow(1 - t, 3);
+const rgba = (h,a) => { const n = parseInt(h.slice(1),16); return `rgba(${n>>16&255},${n>>8&255},${n&255},${a})`; };
+const nodes = D.nodes.map((n,i) => ({...n, i, x:n.x*340 + Math.random()*6, y:n.y*340 + Math.random()*6, vx:0, vy:0, fix:false, ev:null, cons:false, lit:0,
+  r:n.kind === 'doc' ? 11 : 4, q:n.kind === 'doc' ? 5 : 1}));
+const adj = nodes.map(() => []); D.edges.forEach(e => { adj[e.s].push(e); adj[e.t].push(e); });
+nodes.forEach(n => { if (n.kind === 'chunk') n.r += Math.min(3, Math.sqrt(adj[n.i].filter(e => e.kind === 'sim').length)); });
+const evNodes = []; if (HL) { HL.evidence.forEach(e => { nodes[e.i].ev = e; evNodes.push(nodes[e.i]); }); HL.considered.forEach(i => nodes[i].cons = true); }
+const col = n => D.docs[n.doc].color;
+let W, H, dpr = 1, k = 1, tx = 0, ty = 0, alpha = 1, hover = -1, sel = -1, t0 = performance.now(), moved = false, q = null;
+const glow = {}; const sprite = c => glow[c] || (glow[c] = (() => { const s = document.createElement('canvas'); s.width = s.height = 96; const g = s.getContext('2d'), r = g.createRadialGradient(48,48,0,48,48,48);
+  r.addColorStop(0, rgba(c,.9)); r.addColorStop(.25, rgba(c,.4)); r.addColorStop(1, rgba(c,0)); g.fillStyle = r; g.fillRect(0,0,96,96); return s; })());
+
+function fit() { if (!nodes.length) return; const xs = nodes.map(n => n.x).concat(q ? [q.x] : []), ys = nodes.map(n => n.y).concat(q ? [q.y] : []);
+  const x0 = Math.min(...xs), x1 = Math.max(...xs), y0 = Math.min(...ys), y1 = Math.max(...ys);
+  k = clamp(Math.min(W / (x1-x0+200), H / (y1-y0+200)), .15, 2.5); tx = W/2 - (x0+x1)/2*k; ty = H/2 - (y0+y1)/2*k; }
+function resize() { const r = root.getBoundingClientRect(); W = r.width; H = r.height; dpr = Math.min(devicePixelRatio || 1, 2); cv.width = W*dpr; cv.height = H*dpr; if (!moved) fit(); }
+new ResizeObserver(resize).observe(root);
+
+function physics() { if (alpha < .01) return; const n = nodes.length;
+  for (let i = 0; i < n; i++) for (let j = i+1; j < n; j++) { const a = nodes[i], b = nodes[j]; let dx = b.x-a.x, dy = b.y-a.y, d2 = dx*dx+dy*dy;
+    if (d2 > 90000) continue; if (d2 < 9) { dx = Math.random()-.5; dy = Math.random()-.5; d2 = 9; } const d = Math.sqrt(d2), f = a.q*b.q*480/d2*alpha;
+    a.vx -= dx/d*f; a.vy -= dy/d*f; b.vx += dx/d*f; b.vy += dy/d*f; }
+  for (const e of D.edges) { const a = nodes[e.s], b = nodes[e.t], dx = b.x-a.x, dy = b.y-a.y, d = Math.hypot(dx,dy) || 1;
+    const rest = e.kind === 'doc' ? 46 : 110 - 60*e.w, str = e.kind === 'doc' ? .06 : .015 + .02*e.w, f = (d-rest)*str*alpha;
+    a.vx += dx/d*f; a.vy += dy/d*f; b.vx -= dx/d*f; b.vy -= dy/d*f; }
+  for (const a of nodes) { if (a.fix) continue; a.vx -= a.x*.0035*alpha; a.vy -= a.y*.0035*alpha; a.vx *= .78; a.vy *= .78; a.x += a.vx; a.y += a.vy; }
+  alpha *= .992; }
+
+const dim = n => HL ? (n.ev ? 1 : n.cons ? .5 : n.kind === 'doc' ? .6 : .2) : 1;
+function draw(now) {
+  const tt = now/1000, since = now - t0; ctx.setTransform(dpr,0,0,dpr,0,0); ctx.clearRect(0,0,W,H); ctx.setTransform(dpr*k,0,0,dpr*k,dpr*tx,dpr*ty);
+  if (HL) { evNodes.forEach(n => n.lit = ease(clamp((since - 300 - (n.ev.rank-1)*150)/600, 0, 1)));
+    const cx = evNodes.reduce((s,n) => s+n.x, 0)/evNodes.length, cy = evNodes.reduce((s,n) => s+n.y, 0)/evNodes.length;
+    const gx = nodes.reduce((s,n) => s+n.x, 0)/nodes.length, gy = nodes.reduce((s,n) => s+n.y, 0)/nodes.length;
+    let dx = cx-gx, dy = cy-gy, dl = Math.hypot(dx,dy); if (dl < 1) { dx = 0; dy = -1; dl = 1; }
+    const tx2 = cx + dx/dl*150, ty2 = cy + dy/dl*150; q = q ? {x:q.x + (tx2-q.x)*.06, y:q.y + (ty2-q.y)*.06} : {x:tx2, y:ty2}; }
+  ctx.lineCap = 'round'; ctx.lineWidth = 1/k;
+  for (const e of D.edges) { const a = nodes[e.s], b = nodes[e.t], m = Math.min(dim(a), dim(b)) > .3 ? 1 : .4;
+    ctx.strokeStyle = e.kind === 'doc' ? `rgba(148,163,255,${.1*m})` : `rgba(103,232,249,${(.15 + .4*e.w)*m})`;
+    ctx.beginPath(); ctx.moveTo(a.x,a.y); ctx.lineTo(b.x,b.y); ctx.stroke();
+    if (e.kind === 'sim' && a.ev && b.ev) { ctx.save(); ctx.shadowColor = '#22d3ee'; ctx.shadowBlur = 14; ctx.strokeStyle = `rgba(34,211,238,${.95*Math.min(a.lit,b.lit)})`; ctx.lineWidth = 2/k; ctx.stroke(); ctx.restore(); } }
+  const f = hover >= 0 ? hover : sel; if (f >= 0) for (const e of adj[f]) { ctx.save(); ctx.shadowColor = '#f0abfc'; ctx.shadowBlur = 10; ctx.strokeStyle = 'rgba(240,171,252,.85)'; ctx.lineWidth = 1.6/k;
+    ctx.beginPath(); ctx.moveTo(nodes[e.s].x, nodes[e.s].y); ctx.lineTo(nodes[e.t].x, nodes[e.t].y); ctx.stroke(); ctx.restore(); }
+  ctx.globalCompositeOperation = 'lighter';
+  for (const n of nodes) { const s = n.ev ? (n.r + 6 + 14*n.ev.score)*(1 + .6*n.lit) : n.r*(n.kind === 'doc' ? 4 : 5); ctx.globalAlpha = dim(n)*(n.ev ? .4 + .6*n.lit : .7); ctx.drawImage(sprite(col(n)), n.x-s, n.y-s, s*2, s*2); }
+  ctx.globalCompositeOperation = 'source-over';
+  if (HL && q) evNodes.forEach((n, idx) => { const p = ease(clamp((since - 200 - (n.ev.rank-1)*150)/700, 0, 1)); if (p <= 0) return;
+    const mx = (q.x+n.x)/2, my = (q.y+n.y)/2, dx = n.x-q.x, dy = n.y-q.y, len = Math.hypot(dx,dy) || 1, off = len*.2*(idx % 2 ? 1 : -1), c = [mx - dy/len*off, my + dx/len*off];
+    const at = u => [(1-u)*(1-u)*q.x + 2*(1-u)*u*c[0] + u*u*n.x, (1-u)*(1-u)*q.y + 2*(1-u)*u*c[1] + u*u*n.y];
+    ctx.save(); ctx.shadowColor = '#22d3ee'; ctx.shadowBlur = 12; ctx.strokeStyle = '#67e8f9'; ctx.globalAlpha = .7; ctx.lineWidth = (1 + 2*n.ev.score)/k; ctx.beginPath();
+    for (let s = 0; s <= 24; s++) { const pt = at(p*s/24); s ? ctx.lineTo(...pt) : ctx.moveTo(...pt); } ctx.stroke(); ctx.restore();
+    if (p >= 1) { ctx.globalCompositeOperation = 'lighter'; for (let m = 0; m < 3; m++) { const ph = (now/1500 + m/3 + n.ev.rank*.17) % 1, pt = at(ph), s = 8/k; ctx.globalAlpha = Math.sin(ph*Math.PI); ctx.drawImage(sprite('#67e8f9'), pt[0]-s, pt[1]-s, s*2, s*2); } ctx.globalCompositeOperation = 'source-over'; } });
+  for (const n of nodes) { ctx.globalAlpha = dim(n); const c = col(n);
+    if (n.kind === 'doc') { ctx.beginPath(); ctx.arc(n.x, n.y, n.r*.62, 0, 7); ctx.fillStyle = '#04050d'; ctx.fill(); ctx.lineWidth = 2/k; ctx.strokeStyle = c; ctx.stroke();
+      ctx.beginPath(); ctx.arc(n.x, n.y, n.r*.22, 0, 7); ctx.fillStyle = c; ctx.fill(); }
+    else { const r = n.ev ? (5 + 8*n.ev.score)*(.55 + .45*n.lit) : n.r;
+      if (n.ev) { ctx.beginPath(); ctx.arc(n.x, n.y, r*(1.5 + .1*Math.sin(tt*3)), 0, 7); ctx.strokeStyle = c; ctx.lineWidth = 1.3/k; ctx.globalAlpha = .5*n.lit; ctx.stroke(); ctx.globalAlpha = 1; }
+      ctx.beginPath(); ctx.arc(n.x, n.y, r, 0, 7); ctx.fillStyle = c; ctx.fill();
+      if (n.ev) { ctx.beginPath(); ctx.arc(n.x, n.y, r*.45, 0, 7); ctx.fillStyle = '#fff'; ctx.fill(); } }
+    if (COLORS[n.status]) { ctx.save(); ctx.setLineDash([3/k, 3/k]); ctx.lineDashOffset = -tt*6/k; ctx.beginPath(); ctx.arc(n.x, n.y, n.r + 6, 0, 7); ctx.strokeStyle = COLORS[n.status]; ctx.lineWidth = 1.2/k; ctx.stroke(); ctx.restore(); }
+    if (n.i === hover || n.i === sel) { ctx.beginPath(); ctx.arc(n.x, n.y, n.r + 8, 0, 7); ctx.strokeStyle = n.i === sel ? '#22d3ee' : '#fff'; ctx.lineWidth = 1.5/k; ctx.stroke(); } }
+  ctx.globalAlpha = 1; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  const text = (s, x, y, px, c) => { ctx.font = `600 ${px/k}px system-ui,sans-serif`; ctx.lineWidth = 3/k; ctx.strokeStyle = 'rgba(4,5,13,.9)'; ctx.strokeText(s, x, y); ctx.fillStyle = c; ctx.fillText(s, x, y); };
+  for (const n of nodes) { if (n.kind === 'doc') { ctx.globalAlpha = Math.min(1, dim(n) + .2); text(n.title, n.x, n.y + n.r + 11/k, 11, '#e6e9f5'); }
+    else if (n.ev) { const r = (5 + 8*n.ev.score)*(.55 + .45*n.lit); ctx.globalAlpha = n.lit; ctx.beginPath(); ctx.arc(n.x + r, n.y - r, 6.5/k, 0, 7); ctx.fillStyle = '#04121a'; ctx.fill(); ctx.strokeStyle = '#22d3ee'; ctx.lineWidth = 1.2/k; ctx.stroke();
+      text(String(n.ev.rank), n.x + r, n.y - r, 9, '#ecfeff'); text(n.title + ' · #' + n.n, n.x, n.y + r + 11/k, 10.5, '#ecfeff'); } }
+  if (HL && q) { ctx.globalAlpha = 1; ctx.globalCompositeOperation = 'lighter'; const s = 40/k*(1 + .1*Math.sin(tt*3)); ctx.drawImage(sprite('#67e8f9'), q.x-s, q.y-s, s*2, s*2); ctx.globalCompositeOperation = 'source-over';
+    const rp = (since/2600) % 1; ctx.beginPath(); ctx.arc(q.x, q.y, (10 + rp*80)/k, 0, 7); ctx.strokeStyle = '#67e8f9'; ctx.globalAlpha = (1-rp)*.45; ctx.lineWidth = 1.3/k; ctx.stroke(); ctx.globalAlpha = 1;
+    ctx.beginPath(); ctx.arc(q.x, q.y, 3.5/k, 0, 7); ctx.fillStyle = '#fff'; ctx.fill(); text('QUERY', q.x, q.y - 15/k, 10, '#67e8f9'); }
+  ctx.globalAlpha = 1; }
+(function loop(now) { requestAnimationFrame(loop); physics(); draw(now); })(performance.now());
+
+const tip = document.getElementById('tip');
+const world = (x, y) => [(x - tx)/k, (y - ty)/k];
+function pick(x, y) { const [wx, wy] = world(x, y); let b = -1, bd = 1e9; for (const n of nodes) { const d = Math.hypot(n.x-wx, n.y-wy); if (d < Math.max(n.r + 4, 10/k) && d < bd && dim(n) > .15) { bd = d; b = n.i; } } return b; }
+let drag = null;
+cv.onpointerdown = e => { const r = cv.getBoundingClientRect(), x = e.clientX - r.left, y = e.clientY - r.top, h = pick(x, y); cv.setPointerCapture(e.pointerId); drag = {x, y, h, tx, ty, m:false}; if (h >= 0) nodes[h].fix = true; };
+cv.onpointermove = e => { const r = cv.getBoundingClientRect(), x = e.clientX - r.left, y = e.clientY - r.top;
+  if (drag) { if (Math.hypot(x-drag.x, y-drag.y) > 3) drag.m = true; if (drag.m) { if (drag.h >= 0) { [nodes[drag.h].x, nodes[drag.h].y] = world(x, y); alpha = Math.max(alpha, .25); } else { tx = drag.tx + x - drag.x; ty = drag.ty + y - drag.y; moved = true; } } return; }
+  hover = pick(x, y); cv.style.cursor = hover >= 0 ? 'pointer' : 'grab';
+  if (hover >= 0) { const n = nodes[hover]; tip.replaceChildren(Object.assign(document.createElement('b'), {textContent:n.title + (n.kind === 'chunk' ? ' · chunk ' + n.n : '')}), Object.assign(document.createElement('div'), {textContent:n.snip}));
+    tip.style.left = Math.min(W - 280, x + 14) + 'px'; tip.style.top = Math.min(H - 100, y + 14) + 'px'; tip.className = 'glass on'; } else tip.className = 'glass'; };
+cv.onpointerup = () => { if (!drag) return; if (drag.h >= 0) nodes[drag.h].fix = false; if (!drag.m) sel = drag.h === sel ? -1 : drag.h; drag = null; };
+cv.onpointerleave = () => { hover = -1; tip.className = 'glass'; };
+cv.onwheel = e => { e.preventDefault(); moved = true; const r = cv.getBoundingClientRect(), x = e.clientX - r.left, y = e.clientY - r.top, [wx, wy] = world(x, y); k = clamp(k*Math.exp(-e.deltaY*.0015), .1, 6); tx = x - wx*k; ty = y - wy*k; };
+cv.ondblclick = () => { moved = false; fit(); };
+document.getElementById('fit').onclick = () => { moved = false; fit(); };
+document.getElementById('replay').onclick = () => { t0 = performance.now(); };
+if (!HL) document.getElementById('replay').style.display = 'none';
+
+const lg = document.getElementById('legend');
+D.docs.forEach(d => { const r = document.createElement('div'); r.className = 'lg'; const i = document.createElement('i'); i.style.background = i.style.color = d.color; r.append(i, document.createTextNode(d.title));
+  if (d.status !== 'fresh') { const w = document.createElement('b'); w.textContent = '⚠ ' + d.status; w.title = d.reason; r.append(w); } lg.append(r); });
+if (!nodes.length) { document.getElementById('empty').style.display = 'flex'; lg.style.display = 'none'; }
+resize();
+})();
+</script></body></html>
